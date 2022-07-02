@@ -15,8 +15,8 @@ const FILE_CREATION_MODE = 0o600;
 const DIR_CREATION_MODE = 0o700;
 
 const logFd = fs.openSync('./log.txt','as',FILE_CREATION_MODE);
-const IS_HTTPS = true;
-const PORT = 12001;
+const IS_HTTPS = false;
+const PORT = 80;
 const TIME_BETWEEN_PASSWORD_CHECK = 5 * 60000;
 const TIME_TO_PURGE_ZIPS = 60 * 60000 * 24;
 
@@ -53,11 +53,11 @@ httpModule.listen(PORT, '0.0.0.0', () => {
 });
 
 const HTML_STYLE = '.main {text-align: center; vertical-align: middle; position: relative; display: inline-block; padding: 10px}'
-  +' .text {display:block; float:none; margin:auto; position:static}'
+  +' .text {display:block; float:none; margin:auto; position:static; max-width: 15em; word-wrap: break-word}'
   +' .dl {text-align: center;border: 3px solid black;border-radius: 16px;display: block;}'
   +' .dlcenter {margin-left: auto; margin-right:auto; width: 30%}';
 
-const START_LISTING_HTML='<!DOCTYPE html><html><head><style>'+HTML_STYLE+'</style><link rel="stylesheet" href="/assets/fa/css/font-awesome.min.css"></head><body ';
+const START_LISTING_HTML='<!DOCTYPE html><html><head><style>'+HTML_STYLE+'</style><link rel="stylesheet" href="/assets/fa/css/font-awesome.min.css"></head><link rel="icon" type="image/png" sizes="64x64" href="/favicon.png"><body ';
 const END_LISTING_HTML='</div></body></html>';
 
 const dirMap = {};
@@ -181,16 +181,26 @@ function checkExpire(req,res,next) {
 
 function checkPassword(req,res,next) {
   try {
-    let pass = passStore.map[req.path.substring(1).split('/')[1]];
-    if (!pass) {
-      next();
+    const pathParts = req.path.substring(1).split('/');
+    let pathPortion;
+    for (let i = 0; i < pathParts.length; i++) {
+      pathPortion = '/'+pathParts[i];
+      if (pathPortion.startsWith('/')) {
+        pathPortion = pathPortion.substring(1);
+      }
+      let pass = passStore.map[pathPortion];
+      if (pass) {
+        if (req.query.pass == pass) {
+          next();
+          return;
+        } else {
+          log.warn(`Bad credentials given for ${req.baseUrl}`);
+          res.status(403).send('<h1>Invalid credentials</h1>');
+          return;
+        }
+      }
     }
-    else if (pass == req.query.pass) {
-      next();
-    } else {
-      log.warn(`Bad credentials given for ${req.baseUrl}`);
-      res.status(403).send('<h1>Invalid credentials</h1>');
-    }
+    next(); //No password protection found, proceed.
   } catch (e) {
     log.warn(`Error checking password: ${e.message}`);
     res.status(500).send('<h1>Internal server error</h1>');
@@ -421,6 +431,7 @@ function serveListing(req,res,next) {
       fs.readdir(objPath,{withFileTypes: true},function(err, files) {
         if (!err) {
           let backgroundColor = "#ffffff";
+            
           if (req.ip.indexOf('.') != -1) { //ipv4, that's nice.
             let ip = req.ip;
             if (ip.indexOf(':') != -1) {
@@ -442,52 +453,126 @@ function serveListing(req,res,next) {
               +'<i class="fa fa-floppy-o" style="padding: 5px; font-size: 2em">  Download as Zip</i>'
               +'</div></a></div><div>';
           }
+          let directories = [];
+          let videos = [];
+          let sounds = [];
+          let pictures = [];
+          let others = [];
           files.forEach(function(file){
             if (passStore.hasAccess(reqPath+'/'+file.name, req.query.pass)) {
-              const fileWithQuery = `${encodeURIComponent(file.name)+(req.query.pass ? '?pass='+req.query.pass : '')}`;
-              const pathUrl = `/files${reqPath}/${fileWithQuery}`;
-              const lossyUrl = `/lossy${reqPath}/${fileWithQuery}`;
               if (file.isDirectory()) {
-                html+=`<span class="main"><a href="${pathUrl}"><i class="fa fa-folder fa-6" style="color:black; font-size: 17em"></i></a><span class="text">${file.name}</span></span>`;
+                directories.push(file);
               } else {
                 const period = file.name.lastIndexOf('.');
                 if (period == -1) {
-                  html+=`<span class="main"><a href="${pathUrl}"><i class="fa fa-file fa-6" style="color: black; font-size: 17em"></i></a><span class="text">${file.name}</span></span>`;
-                } else {
+                  others.push(file);
+                }
+                else {
                   let ext = file.name.substr(period+1).toLowerCase();
                   switch (ext) {
                   case 'jpg':
                   case 'png':
                   case 'gif':
-                    const thumbnailPath = `/thumbnails${reqPath}/${fileWithQuery}`;
-                    html+= `<span class="main"><a href="${lossyUrl}"><img src="${thumbnailPath}" id=${file.name} onerror="this.src='/assets/warning.png'" alt="${file.name}" width="256"></a><span class="text">${file.name}</span></span>`;
+                    pictures.push(file);
                     break;
                   case 'mp3':
-                    html+=`<span class="main"><audio controls width="256"><source src="${pathUrl}" type="audio/mpeg"></audio><div><a href="${pathUrl}">${file.name}</a></div></span>`;
-                    break;
                   case 'opus':
-                    ext="ogg; codecs=opus";
                   case 'wav':
                   case 'ogg':
                   case 'flac':
-                    html+=`<span class="main"><audio controls width="256"><source src="${pathUrl}" type="audio/${ext}"></audio><div><a href="${pathUrl}">${file.name}</a></div></span>`;
-                    break;
                   case 'm4a':
-                    html+=`<span class="main"><audio controls width="256"><source src="${pathUrl}" type="audio/mp4"></audio><div><a href="${pathUrl}">${file.name}</a></div></span>`;
+                    sounds.push(file);
                     break;
                   case 'm4v':
-                    ext="mp4";
                   case 'mp4':
+                  case 'mkv':
                   case 'webm':
-                    html+=`<span class="main"><video controls height="480"><source src="${pathUrl}" type="video/${ext}"></video><div><a href="${pathUrl}">${file.name}</a></div></span>`;
+                    videos.push(file);
                     break;
                   default:
-                    html+=`<span class="main"><a href="${pathUrl}"><i class="fa fa-file fa-6" style="color:black; font-size: 17em"></i></a><span class="text">${file.name}</span></span>`;
+                    others.push(file);
                   }
                 }
               }
             }
           });
+                          
+          directories.forEach(function(file) {
+            const fileWithQuery = `${encodeURIComponent(file.name)+(req.query.pass ? '?pass='+req.query.pass : '')}`;
+            const pathUrl = `/files${reqPath}/${fileWithQuery}`;
+            const lossyUrl = `/lossy${reqPath}/${fileWithQuery}`;
+            if (file.isDirectory()) {
+              html+=`<span class="main"><a href="${pathUrl}"><i class="fa fa-folder fa-6" style="color:black; font-size: 17em"></i></a><span class="text">${file.name}</span></span>`;
+            }
+          });
+                        
+          pictures.forEach(function(file) {
+            const fileWithQuery = `${encodeURIComponent(file.name)+(req.query.pass ? '?pass='+req.query.pass : '')}`;
+            const pathUrl = `/files${reqPath}/${fileWithQuery}`;
+            const lossyUrl = `/lossy${reqPath}/${fileWithQuery}`;
+            const period = file.name.lastIndexOf('.');
+            let ext = file.name.substr(period+1).toLowerCase();
+            switch (ext) {
+            case 'jpg':
+            case 'png':
+            case 'gif':
+              const thumbnailPath = `/thumbnails${reqPath}/${fileWithQuery}`;
+              html+= `<span class="main"><a href="${lossyUrl}"><img src="${thumbnailPath}" id=${file.name} onerror="this.src='/assets/warning.png'" alt="${file.name}" width="256"></a><span class="text">${file.name}</span></span>`;
+              break;
+            }
+          });
+                        
+          others.forEach(function(file) {
+            const fileWithQuery = `${encodeURIComponent(file.name)+(req.query.pass ? '?pass='+req.query.pass : '')}`;
+            const pathUrl = `/files${reqPath}/${fileWithQuery}`;
+            const lossyUrl = `/lossy${reqPath}/${fileWithQuery}`;
+            const period = file.name.lastIndexOf('.');
+            let ext = file.name.substr(period+1).toLowerCase();
+            html+=`<span class="main"><a href="${pathUrl}"><i class="fa fa-file fa-6" style="color:black; font-size: 17em"></i></a><span class="text">${file.name}</span></span>`;
+          });
+
+          sounds.forEach(function(file) {
+            const fileWithQuery = `${encodeURIComponent(file.name)+(req.query.pass ? '?pass='+req.query.pass : '')}`;
+            const pathUrl = `/files${reqPath}/${fileWithQuery}`;
+            const lossyUrl = `/lossy${reqPath}/${fileWithQuery}`;
+            const period = file.name.lastIndexOf('.');
+            let ext = file.name.substr(period+1).toLowerCase();
+            switch (ext) {
+            case 'mp3':
+              html+=`<span class="main"><audio controls width="256"><source src="${pathUrl}" type="audio/mpeg"></audio><div><a href="${pathUrl}">${file.name}</a></div></span>`;
+              break;
+            case 'opus':
+              ext="ogg; codecs=opus";
+            case 'wav':
+            case 'ogg':
+            case 'flac':
+              html+=`<span class="main"><audio controls width="256"><source src="${pathUrl}" type="audio/${ext}"></audio><div><a href="${pathUrl}">${file.name}</a></div></span>`;
+              break;
+            case 'm4a':
+              html+=`<span class="main"><audio controls width="256"><source src="${pathUrl}" type="audio/mp4"></audio><div><a href="${pathUrl}">${file.name}</a></div></span>`;
+              break;
+            }    
+          });
+
+          videos.forEach(function(file) {
+            const fileWithQuery = `${encodeURIComponent(file.name)+(req.query.pass ? '?pass='+req.query.pass : '')}`;
+            const pathUrl = `/files${reqPath}/${fileWithQuery}`;
+            const lossyUrl = `/lossy${reqPath}/${fileWithQuery}`;
+            const period = file.name.lastIndexOf('.');
+            let ext = file.name.substr(period+1).toLowerCase();
+            switch (ext) {
+            case 'mkv':
+              html+=`<span class="main"><video controls height="480" preload="metadata"><source src="${pathUrl}"></video><div><a href="${pathUrl}">${file.name}</a></div></span>`;
+              break;
+            case 'm4v':
+              ext="mp4";
+            case 'mp4':
+            case 'webm':
+              html+=`<span class="main"><video controls height="480" preload="metadata"><source src="${pathUrl}" type="video/${ext}"></video><div><a href="${pathUrl}">${file.name}</a></div></span>`;
+              break;
+            }
+          });
+
           res.status(200).send(html+END_LISTING_HTML);
         } else {
           log.warn(`Could not read dir=${objPath}. {err.message}`);
@@ -649,6 +734,9 @@ function closeOnSignals(listener, signals) {
   }
 }
 
+app.enable('trust proxy');
+app.use('/favicon.ico', [express.static('./favicon.png')]),
+app.use('/favicon.png', [express.static('./favicon.png')]),
 app.use('/stats', [logReqs, getStats]);
 app.use('/thumbnails', [forbidden, checkPassword, makeThumbnail, express.static('./thumbnails')]);
 app.use('/lossy',[logReqs, forbidden, checkPassword, serveListing, imageCompress]);
