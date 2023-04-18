@@ -1,15 +1,22 @@
-const express = require('express');
-const shrinkRay = require('shrink-ray-current');
-const imagemin = require('imagemin');
-const imagejpg = require('imagemin-mozjpeg');
-const imagegif = require('imagemin-gifsicle');
-const imagepng = require('imagemin-pngquant');
-const os = require('os');
-const mkdirp = require('mkdirp');
-const fs = require('graceful-fs');
-const path = require('path');
-const yazl = require('yazl');
-const sharp = require('sharp');
+import express from 'express';
+import shrinkRay from 'shrink-ray-current';
+import imagemin from 'imagemin';
+import imageconverter from 'imagemin-avif';
+import os from 'os';
+import mkdirp from 'mkdirp';
+import fs from 'graceful-fs';
+import path from 'path';
+import yazl from 'yazl';
+import sharp from 'sharp';
+import http from 'http';
+import https from 'https';
+
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const CONVERTED_EXTENSION='avif';
 
 const FILE_CREATION_MODE = 0o600;
 const DIR_CREATION_MODE = 0o700;
@@ -41,10 +48,8 @@ if (IS_HTTPS) {
                                        consts.SSL_OP_NO_SSLv3 |
                                        consts.SSL_OP_NO_TLSv1 |
                                        consts.SSL_OP_NO_TLSv1_11};
-  const https = require('https');
   httpModule = https.createServer(httpsOptions, app);
 } else {
-  const http = require('http');
   httpModule = http.createServer(app);
 }
 httpModule.listen(PORT, '0.0.0.0', () => {
@@ -609,23 +614,23 @@ function makeThumbnail(req,res,next) {
   const lastSlash = reqPath.lastIndexOf('/');
   const directory = path.join('./thumbnails','.'+reqPath.substr(0,lastSlash));
   const file = reqPath.substr(lastSlash+1);
-  const output = path.resolve(directory, file);
+  const fileNoExtension = file.substr(0, file.lastIndexOf('.'));  
+  const output = path.resolve(directory, fileNoExtension+'.'+CONVERTED_EXTENSION);
   fs.access(output,fs.constants.R_OK,function(err){
     if (!err) {
-      next();
+      res.sendFile(output);
     } else {
       mkdirp(directory).then(() => {
         fs.readFile(originalPath,function(err,imageBuffer) {
           if (!err) {
             sharp(imageBuffer)
               .resize({ width: 256, height: 256, fit: 'inside', withoutEnlargement: true })
+              .avif()
               .toFile(output, function(err, info) {
-                if (!err) {
-                  next();
-                } else {
+                if (err) {
                   log.warn(`Could not create thumbnail for ${originalPath}, ${err.message}`);
-                  res.sendFile(originalPath);
                 }
+                res.sendFile(originalPath);
               });
           } else {
             log.warn(`Could not create thumbnail for ${originalPath}, ${err.message}`);            
@@ -670,7 +675,7 @@ function makeLossyImage(originalPath, lossyPath, returnImage) {
             reject();
           } else {
             imagemin.buffer(data, {
-              plugins: [imagejpg({quality:80}), imagepng(), imagegif()]
+              plugins: [imageconverter({quality:70, speed: 4})]
             }).then(function(out) {
               const lastSlash = lossyPath.lastIndexOf('/');
               const directory = lossyPath.substr(0,lastSlash);
@@ -702,19 +707,22 @@ function imageCompress(req, res, next) {
   reqPath = reqPath.endsWith('/') ? reqPath.substring(0,reqPath.length-1) : reqPath;
   const originalPath = path.join(FILE_DIR,'.'+reqPath);
   const lossyPath = path.resolve('./lossy','.'+reqPath);
-  
+  const lossyConvertedPath = path.resolve('./lossy','.'+reqPath.substring(0, reqPath.lastIndexOf('.'))+'.'+CONVERTED_EXTENSION);
+
   if (req.headers['x-no-compression'] || req.query.original == '1') {
     res.sendFile(originalPath);
   } else {
     const dot = req.path.lastIndexOf('.');
     if (dot != -1) {
       const ext = req.path.substr(dot+1).toLowerCase();
-      if (ext == 'jpg' || ext == 'jpeg' || ext == 'png' || ext == 'gif') {
-        makeLossyImage(originalPath, lossyPath, true).then(function(image) {
-          res.status(200).set('Content-Type', 'image/'+ext).send(image);
+      if (ext == 'jpg' || ext == 'jpeg' || ext == 'png') {// || ext == 'gif') {
+        makeLossyImage(originalPath, lossyConvertedPath, true).then(function(image) {
+          res.status(200).set('Content-Type', 'image/'+CONVERTED_EXTENSION).send(image);
         }).catch(function() {
           res.sendFile(originalPath);
         });
+      } else if (ext == 'gif') {
+        res.sendFile(originalPath);
       } else {
         res.status(404).send('<h1>Not found</h1>');
       }
@@ -738,7 +746,7 @@ app.enable('trust proxy');
 app.use('/favicon.ico', [express.static('./favicon.png')]),
 app.use('/favicon.png', [express.static('./favicon.png')]),
 app.use('/stats', [logReqs, getStats]);
-app.use('/thumbnails', [forbidden, checkPassword, makeThumbnail, express.static('./thumbnails')]);
+app.use('/thumbnails', [forbidden, checkPassword, makeThumbnail]);
 app.use('/lossy',[logReqs, forbidden, checkPassword, serveListing, imageCompress]);
 app.use('/assets/fa',[express.static('./node_modules/font-awesome')]);
 const WARNING_PATH = path.resolve('./warning.png');

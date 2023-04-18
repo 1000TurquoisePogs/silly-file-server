@@ -1,17 +1,17 @@
 {
   "name": "silly-file-server",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "File server with expiration, passwords, and archives",
   "repository": {
     "type": "git",
     "url": "https://github.com/1000TurquoisePogs/silly-file-server.git"
   },
-  "main": "file-server.js",
+  "main": "file-server.mjs",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "engines": {
-    "node": "^12.0.0"
+    "node": "^14.0.0"
   },
   "author": "1000TurquoisePogs",
   "license": "CC0-1.0",
@@ -20,12 +20,10 @@
     "font-awesome": "^4.7.0",
     "graceful-fs": "^4.2.2",
     "imagemin": "^7.0.0",
-    "imagemin-gifsicle": "~6.0.0",
-    "imagemin-mozjpeg": "^8.0.0",
-    "imagemin-pngquant": "^9.0.0",
+    "imagemin-avif": "^0.1.4",
     "mkdirp": "^1.0.0",
     "node-zopfli-es": "^1.0.6",
-    "sharp": "^0.23.1",
+    "sharp": "^0.31.1",
     "shrink-ray-current": "^4.1.2",
     "yazl": "^2.5.1"
   }
