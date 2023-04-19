@@ -1,6 +1,6 @@
 {
   "name": "silly-file-server",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "File server with expiration, passwords, and archives",
   "repository": {
     "type": "git",
@@ -11,7 +11,7 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "engines": {
-    "node": "^14.0.0"
+    "node": ">=14.0.0"
   },
   "author": "1000TurquoisePogs",
   "license": "CC0-1.0",
@@ -19,8 +19,6 @@
     "express": "^4.17.1",
     "font-awesome": "^4.7.0",
     "graceful-fs": "^4.2.2",
-    "imagemin": "^7.0.0",
-    "imagemin-avif": "^0.1.4",
     "mkdirp": "^1.0.0",
     "node-zopfli-es": "^1.0.6",
     "sharp": "^0.31.1",

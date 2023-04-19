@@ -1,7 +1,5 @@
 import express from 'express';
 import shrinkRay from 'shrink-ray-current';
-import imagemin from 'imagemin';
-import imageconverter from 'imagemin-avif';
 import os from 'os';
 import mkdirp from 'mkdirp';
 import fs from 'graceful-fs';
@@ -16,7 +14,28 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const CONVERTED_EXTENSION='avif';
+const DEFAULT_IMAGE_COMPRESSION_TYPE='webp';
+const DEFAULT_THUMBNAIL_COMPRESSION_TYPE='avif';
+const IMAGE_COMPRESSION_TYPES = {
+  avif: { extension: "avif", mime: "avif", method: "avif", options: {
+    lossy: { effort: 6, quality: 65 },
+    thumbnail: { effort: 4, quality: 50}
+  }},
+  jpg: { extension: "jpg", mime: "jpg", method: "jpeg", options: {
+    lossy: { effort: 6, quality: 80, mozjpeg: true },
+    thumbnail: { effort: 4, quality: 60, mozjpeg: true}
+  }},
+  jxl: { extension: "jxl", mime: "jxl", method: "jxl", options: {
+    lossy: { effort: 7, quality: 60 },
+    thumbnail: { effort: 4, quality: 45 }
+  }},
+  webp: { extension: "webp", mime: "webp", method: "webp", options: {
+    lossy: { effort: 4, quality: 80 },
+    thumbnail: { effort: 2, quality: 65 }
+  }}
+};
+
+const DEBUG_MODE=false;
 
 const FILE_CREATION_MODE = 0o600;
 const DIR_CREATION_MODE = 0o700;
@@ -83,13 +102,19 @@ class Logger {
     let line = this.getPrefix('warn')+msg;
     fs.write(logFd,line+'\n',function(){});
   }
+  debug(msg) {
+    if (DEBUG_MODE) {
+      let line = this.getPrefix('debug')+msg;
+      fs.write(logFd,line+'\n',function(){});
+    }
+  }
 }
 const log = new Logger();
 
 
 function addWatchers(folder) {
   return false;
-  log.info('addwatcher to '+folder);
+  log.debug('addwatcher to '+folder);
   fs.readdir(folder, {withFileTypes: true}, function(err, files) {
     if (err) {
       log.warn('Error in addWatchers, '+err.message);
@@ -108,7 +133,7 @@ function addWatchers(folder) {
         let originalPath = path.join(folder, name);
         fs.stat(originalPath, function(err, stat) {
           let lossyPath = originalPath.replace(FILE_DIR,path.resolve('./lossy'));
-          log.info('dealing with lossy for '+originalPath+' and '+lossyPath);
+          log.debug('dealing with lossy for '+originalPath+' and '+lossyPath);
           if (!err) {
             makeLossyImage(originalPath, lossyPath, false);
           } else {
@@ -567,13 +592,13 @@ function serveListing(req,res,next) {
             let ext = file.name.substr(period+1).toLowerCase();
             switch (ext) {
             case 'mkv':
-              html+=`<span class="main"><video controls height="480" preload="metadata"><source src="${pathUrl}"></video><div><a href="${pathUrl}">${file.name}</a></div></span>`;
+              html+=`<span class="main"><video controls height="480" preload="none"><source src="${pathUrl}"></video><div><a href="${pathUrl}">${file.name}</a></div></span>`;
               break;
             case 'm4v':
               ext="mp4";
             case 'mp4':
             case 'webm':
-              html+=`<span class="main"><video controls height="480" preload="metadata"><source src="${pathUrl}" type="video/${ext}"></video><div><a href="${pathUrl}">${file.name}</a></div></span>`;
+              html+=`<span class="main"><video controls height="480" preload="none"><source src="${pathUrl}" type="video/${ext}"></video><div><a href="${pathUrl}">${file.name}</a></div></span>`;
               break;
             }
           });
@@ -614,23 +639,34 @@ function makeThumbnail(req,res,next) {
   const lastSlash = reqPath.lastIndexOf('/');
   const directory = path.join('./thumbnails','.'+reqPath.substr(0,lastSlash));
   const file = reqPath.substr(lastSlash+1);
-  const fileNoExtension = file.substr(0, file.lastIndexOf('.'));  
-  const output = path.resolve(directory, fileNoExtension+'.'+CONVERTED_EXTENSION);
+  const fileNoExtension = file.substr(0, file.lastIndexOf('.'));
+
+  let imageType = IMAGE_COMPRESSION_TYPES[req.query.imagecompress];
+  if (!imageType) { imageType = IMAGE_COMPRESSION_TYPES[DEFAULT_THUMBNAIL_COMPRESSION_TYPE] }
+
+  const output = path.resolve(directory, fileNoExtension+'.'+imageType.extension);
   fs.access(output,fs.constants.R_OK,function(err){
     if (!err) {
-      res.sendFile(output);
+      res.status(200).set('Content-Type', 'image/'+imageType.mime).sendFile(output);
     } else {
       mkdirp(directory).then(() => {
         fs.readFile(originalPath,function(err,imageBuffer) {
           if (!err) {
             sharp(imageBuffer)
               .resize({ width: 256, height: 256, fit: 'inside', withoutEnlargement: true })
-              .avif()
-              .toFile(output, function(err, info) {
+              [imageType.method](imageType.options.thumbnail)
+              .toBuffer((err, out, info)=> {
                 if (err) {
-                  log.warn(`Could not create thumbnail for ${originalPath}, ${err.message}`);
+                  log.warn(`Sharp failed on making thumbnail for ${originalPath}, ${err.message}`);
+                  res.sendFile(originalPath);
+                } else {
+                  res.status(200).set('Content-Type', 'image/'+imageType.mime).send(out);
+                  fs.writeFile(output, out, {mode: FILE_CREATION_MODE}, function(err){
+                    if (err) {
+                      log.warn(`Error writting thumbnail to ${output}, ${err.message}`);
+                    }
+                  });
                 }
-                res.sendFile(originalPath);
               });
           } else {
             log.warn(`Could not create thumbnail for ${originalPath}, ${err.message}`);            
@@ -663,39 +699,44 @@ const otfCompression = shrinkRay({
   }
 });
 
-function makeLossyImage(originalPath, lossyPath, returnImage) {
+function makeLossyImage(originalPath, lossyPath, returnImage, imageType) {
   return new Promise(function(resolve, reject) {
     let func = returnImage ? fs.readFile : fs.stat;
     func(lossyPath,function(err,data) {
       if (err) {
+        log.debug(`Cache miss: lossy, ${lossyPath}`);
         //cant find, generate.
         fs.readFile(originalPath,function(err,data){
           if (err) {
-            log.warn('err='+err.message);
-            reject();
+            log.warn('makeLossyImage read original file err='+err.message);
+            return reject(err);
           } else {
-            imagemin.buffer(data, {
-              plugins: [imageconverter({quality:70, speed: 4})]
-            }).then(function(out) {
-              const lastSlash = lossyPath.lastIndexOf('/');
-              const directory = lossyPath.substr(0,lastSlash);
-              mkdirp(directory).then(() => {
-                fs.writeFile(lossyPath, out, {mode: FILE_CREATION_MODE}, function(err){
-                  if (err) {
-                    log.warn(`Error writting lossy file result ${lossyPath}, ${err.message}`);
-                  }
-                });
-              }).catch((err)=>{
-                log.warn(`Error making dir for lossy file result ${lossyPath}, ${err.message}`);
+            const lastSlash = lossyPath.lastIndexOf('/');
+            const directory = lossyPath.substr(0,lastSlash);
+            mkdirp(directory).then(() => {
+            sharp(data)
+              [imageType.method](imageType.options.lossy)
+              .toBuffer((err, out, info)=> {
+                if (err) {
+                  log.warn(`makeLossyImaage sharp failed on ${originalPath}, ${err.message}`);
+                  return reject(err);
+                } else {
+                  resolve(returnImage ? out: undefined);
+                  fs.writeFile(lossyPath, out, {mode: FILE_CREATION_MODE}, function(err){
+                    if (err) {
+                      log.warn(`makeLossyImage failed writing result ${lossyPath}, ${err.message}`);
+                    }
+                  });
+                }
               });
-              resolve(out);
-            }).catch(function(err) {
-              log.warn('err='+err.message);
-              reject();
+            }).catch((err)=>{
+              log.warn(`makeLossyImage failed mkdir for ${lossyPath}, ${err.message}`);
+              return reject(err);
             });
           }
         });
       } else {
+        log.debug(`Cache hit: lossy, ${lossyPath}`);
         resolve(returnImage ? data : undefined);
       }
     });
@@ -706,18 +747,24 @@ function imageCompress(req, res, next) {
   let reqPath = decodeURIComponent(req.path);
   reqPath = reqPath.endsWith('/') ? reqPath.substring(0,reqPath.length-1) : reqPath;
   const originalPath = path.join(FILE_DIR,'.'+reqPath);
-  const lossyPath = path.resolve('./lossy','.'+reqPath);
-  const lossyConvertedPath = path.resolve('./lossy','.'+reqPath.substring(0, reqPath.lastIndexOf('.'))+'.'+CONVERTED_EXTENSION);
 
   if (req.headers['x-no-compression'] || req.query.original == '1') {
     res.sendFile(originalPath);
   } else {
-    const dot = req.path.lastIndexOf('.');
-    if (dot != -1) {
-      const ext = req.path.substr(dot+1).toLowerCase();
+    const lastDotIndex = req.path.lastIndexOf('.');
+    if (lastDotIndex != -1) {
+      const ext = req.path.substr(lastDotIndex+1).toLowerCase();
       if (ext == 'jpg' || ext == 'jpeg' || ext == 'png') {// || ext == 'gif') {
-        makeLossyImage(originalPath, lossyConvertedPath, true).then(function(image) {
-          res.status(200).set('Content-Type', 'image/'+CONVERTED_EXTENSION).send(image);
+
+        const lossyPath = path.resolve('./lossy','.'+reqPath);
+
+        let imageType = IMAGE_COMPRESSION_TYPES[req.query.imagecompress];
+        if (!imageType) { imageType = IMAGE_COMPRESSION_TYPES[DEFAULT_IMAGE_COMPRESSION_TYPE] }
+
+        const lossyConvertedPath = path.resolve('./lossy',`.${reqPath.substring(0, lastDotIndex)}.${imageType.extension}`);
+
+        makeLossyImage(originalPath, lossyConvertedPath, true, imageType).then(function(image) {
+          res.status(200).set('Content-Type', 'image/'+imageType.mime).send(image);
         }).catch(function() {
           res.sendFile(originalPath);
         });
