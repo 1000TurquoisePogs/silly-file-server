@@ -14,33 +14,18 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const DEBUG_MODE=false;
+
+const FILE_DIR = path.join(__dirname,'./file-dir');
+const THUMBNAIL_DIR = path.join(__dirname, './thumbnails');
+const LOSSY_DIR = path.join(__dirname, './lossy');
+
 const DEFAULT_IMAGE_COMPRESSION_TYPE='webp';
 const DEFAULT_THUMBNAIL_COMPRESSION_TYPE='avif';
-const IMAGE_COMPRESSION_TYPES = {
-  avif: { extension: "avif", mime: "avif", method: "avif", options: {
-    lossy: { effort: 6, quality: 65 },
-    thumbnail: { effort: 4, quality: 50}
-  }},
-  jpg: { extension: "jpg", mime: "jpg", method: "jpeg", options: {
-    lossy: { effort: 6, quality: 80, mozjpeg: true },
-    thumbnail: { effort: 4, quality: 60, mozjpeg: true}
-  }},
-  jxl: { extension: "jxl", mime: "jxl", method: "jxl", options: {
-    lossy: { effort: 7, quality: 60 },
-    thumbnail: { effort: 4, quality: 45 }
-  }},
-  webp: { extension: "webp", mime: "webp", method: "webp", options: {
-    lossy: { effort: 4, quality: 80 },
-    thumbnail: { effort: 2, quality: 65 }
-  }}
-};
-
-const DEBUG_MODE=false;
 
 const FILE_CREATION_MODE = 0o600;
 const DIR_CREATION_MODE = 0o700;
 
-const logFd = fs.openSync('./log.txt','as',FILE_CREATION_MODE);
 const IS_HTTPS = false;
 const PORT = 80;
 const TIME_BETWEEN_PASSWORD_CHECK = 5 * 60000;
@@ -53,7 +38,243 @@ const COMPRESSION_MIN_SIZE = '64kb';
 const COMPRESSION_ZLIB_LEVEL = 6;//see https://blogs.akamai.com/2016/02/understanding-brotlis-potential.html
 const COMPRESSION_BROTLI_LEVEL = 5;
 
+sharp.cache(false); 
+
+const IMAGE_COMPRESSION_TYPES = {
+  avif: { extension: "avif", mime: "avif", method: "avif", options: {
+    lossy: { effort: 9, quality: 65 },
+    thumbnail: { effort: 9, quality: 50 }
+  }},
+  jpg: { extension: "jpg", mime: "jpg", method: "jpeg", options: {
+    lossy: { quality: 80, mozjpeg: true },
+    thumbnail: { quality: 60, mozjpeg: true }
+  }},
+  jxl: { extension: "jxl", mime: "jxl", method: "jxl", options: {
+    lossy: { effort: 9, quality: 60, decodingTier: 2 },
+    thumbnail: { effort: 9, quality: 45 }
+  }},
+  webp: { extension: "webp", mime: "webp", method: "webp", options: {
+    lossy: { effort: 6, quality: 80 },
+    thumbnail: { effort: 6, quality: 65 }
+  }}
+};
+const EXTENSIONS_TO_COMPRESS = ['jpg', 'jpeg', 'png', 'dng', 'avif', 'jxl', 'webp', 'heic'];
+
+
+
+const logFd = fs.openSync('./log.txt','as',FILE_CREATION_MODE);
+
 let httpModule;
+
+mkdirp.sync(FILE_DIR);
+mkdirp.sync(THUMBNAIL_DIR);
+mkdirp.sync(LOSSY_DIR);
+mkdirp.sync('./temp');
+
+
+
+class Logger {
+  getPrefix(type){
+    return `[${new Date(Date.now()).toLocaleString('ja-JP')} - ${type}] `; 
+  }
+  info(msg){
+    let line = this.getPrefix('info')+msg;
+    fs.write(logFd,line+'\n',function(){});
+  }
+  warn(msg){
+    let line = this.getPrefix('warn')+msg;
+    fs.write(logFd,line+'\n',function(){});
+  }
+  debug(msg) {
+    if (DEBUG_MODE) {
+      let line = this.getPrefix('debug')+msg;
+      fs.write(logFd,line+'\n',function(){});
+    }
+  }
+}
+const log = new Logger();
+
+
+class PreCacher {
+  constructor(relativeRootDir) {
+    this.dirMap = {};
+    this.timer = null;
+    this.relativeRootDir = relativeRootDir;
+    this.items = [];
+    this._addImagesToList(relativeRootDir);
+  }
+
+  _addImagesToList(relativeDir) {
+    const inDir = path.join(FILE_DIR, relativeDir);
+    const thumbOutDir = path.join(THUMBNAIL_DIR, relativeDir);
+    const lossyOutDir = path.join(LOSSY_DIR, relativeDir);
+    const thumbnailType = IMAGE_COMPRESSION_TYPES[DEFAULT_THUMBNAIL_COMPRESSION_TYPE];
+    
+    mkdirp.sync(thumbOutDir);
+    mkdirp.sync(lossyOutDir);
+    
+    const files = fs.readdirSync(inDir, {withFileTypes: true});
+    try {
+      files.forEach((file)=> {
+        if (file.isDirectory() || file.isSymbolicLink()) {
+          this._addImagesToList(path.join(relativeDir, file.name));
+        } else {
+          const ext = file.name.substring(file.name.lastIndexOf('.')+1).toLowerCase();
+          if (EXTENSIONS_TO_COMPRESS.indexOf(ext) != -1) {
+            const thumbnailName = path.join(thumbOutDir, file.name.substring(0,file.name.length - ext.length)+thumbnailType.extension);
+            try {
+              fs.accessSync(thumbnailName,fs.constants.R_OK);
+            } catch (e) {
+              // doesnt exist? create.
+              this.items.push({type: 'thumbnail', compressionType: thumbnailType, destination: thumbnailName, source: path.join(inDir, file.name)});  
+            }
+            Object.keys(IMAGE_COMPRESSION_TYPES).forEach((key)=> {
+              const outname = path.join(lossyOutDir, file.name.substring(0,file.name.length - ext.length)+IMAGE_COMPRESSION_TYPES[key].extension);
+              try {
+                fs.accessSync(outname,fs.constants.R_OK);
+              } catch (e) {
+                this.items.push({type: "lossy", compressionType: IMAGE_COMPRESSION_TYPES[key], destination: outname, source: path.join(inDir, file.name)});
+              }
+            });
+          }
+        }
+      });
+    } catch (err) {
+      log.warn(`Could not read dir ${inDir}, err=${err.message}`); 
+    }
+  }
+
+
+  start() {
+    this._process();
+  }
+
+  clearWatchers() {
+    Object.keys(this.dirMap).forEach((watcherKey)=> {
+      this.dirMap[watcherKey].close();
+    });
+    this.dirMap = {};
+  }
+
+  watch(relativeDir) {
+    const inDir = path.join(FILE_DIR, relativeDir);
+    fs.readdir(inDir, {withFileTypes: true}, (err, files)=> {
+      if (err) {
+        log.warn(`Could not get directories for ${inDir}, they will not be watched`);
+      } else {
+        files.forEach((file)=>{
+          if (file.isDirectory() || file.isSymbolicLink()) {
+            this.watch(path.join(relativeDir ,file.name));
+          }
+        });
+      }
+    });
+    if (!this.dirMap[inDir]) {
+//      log.debug('Watching '+inDir);
+
+      this.dirMap[inDir] = fs.watch(inDir,{persistent: false}, (event, name)=> {
+        if (event == 'rename') { //object added or removed
+          if (this.timer) { clearTimeout(this.timer); }
+          this.timer = setTimeout(()=>{
+            this._addImagesToList(relativeDir);
+            this._process();
+            this.watch(relativeDir);
+          },1000);
+        }
+      });
+    }
+  }
+
+  makeThumbnail(imageBuffer, compressionType, source, destination) {
+    return new Promise((resolve, reject)=> {
+    sharp(imageBuffer)
+      .resize({ width: 256, height: 256, fit: 'inside', withoutEnlargement: true })
+    [compressionType.method](compressionType.options.thumbnail)
+      .toBuffer((err, out, info)=> {
+        if (err) {
+          log.warn(`Sharp failed on making thumbnail for ${source}, ${err.message}`);
+          reject(err);
+        } else {
+          fs.writeFile(destination, out, {mode: FILE_CREATION_MODE}, (err)=>{
+            if (err) {
+              log.warn(`Error writting thumbnail to ${destination}, ${err.message}`);
+              reject(err);
+            } else {
+              resolve();
+            }
+          });
+        }
+      });
+    });
+  }
+
+  makeLossyImage(imageBuffer, compressionType, source, destination) {
+    return new Promise(function(resolve, reject) {
+      sharp(imageBuffer)
+      [compressionType.method](compressionType.options.lossy)
+        .toBuffer((err, out, info)=> {
+          if (err) {
+            log.warn(`makeLossyImaage sharp failed on ${source}, ${err.message}`);
+            reject(err);
+          } else {
+            fs.writeFile(destination, out, {mode: FILE_CREATION_MODE}, function(err){
+              if (err) {
+                log.warn(`makeLossyImage failed writing result ${destination}, ${err.message}`);
+                reject(err);
+              } else {
+                resolve();
+              }
+            });
+          }
+        });
+    });
+  }
+
+  _continueOrComplete() {
+    if (this.items.length!=0) {
+      this._process();
+    } 
+  }
+
+  _process() {
+    const item = this.items.pop();
+    if (item.type=='thumbnail') {
+      log.debug(`Thumbnailing ${item.compressionType.extension} of ${item.source}`);
+      fs.readFile(item.source, (err, imageBuffer) => {
+        if (err) {
+          log.warn(`Error reading ${item.source}, ${err.message}`);
+          this._continueOrComplete();
+        } else {
+          this.makeThumbnail(imageBuffer, item.compressionType, item.source, item.destination).then(()=> {
+            this._continueOrComplete();
+          }).catch((e)=> {
+            this._continueOrComplete();
+          });
+        }
+      });
+    } else {
+      log.debug(`Making lossy ${item.compressionType.extension} of ${item.source}`);
+      fs.readFile(item.source, (err, imageBuffer) => {
+        if (err) {
+          log.warn(`Error reading ${item.source}, ${err.message}`);
+          this._continueOrComplete();
+        } else {
+          this.makeLossyImage(imageBuffer, item.compressionType, item.source, item.destination).then(()=> {
+            this._continueOrComplete();
+          }).catch((e)=> {
+            this._continueOrComplete();
+          });
+        }
+      });
+    }
+  }
+}
+
+
+const precacher = new PreCacher('.');
+precacher.start();
+precacher.watch('.');
+
 const app = express();
 if (IS_HTTPS) {
   const HTTPS_KEY = fs.readFileSync('./https.key');
@@ -81,74 +302,12 @@ const HTML_STYLE = '.main {text-align: center; vertical-align: middle; position:
   +' .dl {text-align: center;border: 3px solid black;border-radius: 16px;display: block;}'
   +' .dlcenter {margin-left: auto; margin-right:auto; width: 30%}';
 
-const START_LISTING_HTML='<!DOCTYPE html><html><head><style>'+HTML_STYLE+'</style><link rel="stylesheet" href="/assets/fa/css/font-awesome.min.css"></head><link rel="icon" type="image/png" sizes="64x64" href="/favicon.png"><body ';
+const START_LISTING_HTML='<!DOCTYPE html><html><head><style>'+HTML_STYLE+'</style><link rel="stylesheet" href="/assets/fa/css/font-awesome.min.css"></head><link rel="icon" type="image/png" href="/favicon.png"><body ';
 const END_LISTING_HTML='</div></body></html>';
 
-const dirMap = {};
-const FILE_DIR = path.join(__dirname,'./file-dir');
-mkdirp.sync('./file-dir');
-mkdirp.sync('./thumbnails');
-mkdirp.sync('./temp');
-
-class Logger {
-  getPrefix(type){
-    return `[${new Date(Date.now()).toUTCString()} - ${type}] `; 
-  }
-  info(msg){
-    let line = this.getPrefix('info')+msg;
-    fs.write(logFd,line+'\n',function(){});
-  }
-  warn(msg){
-    let line = this.getPrefix('warn')+msg;
-    fs.write(logFd,line+'\n',function(){});
-  }
-  debug(msg) {
-    if (DEBUG_MODE) {
-      let line = this.getPrefix('debug')+msg;
-      fs.write(logFd,line+'\n',function(){});
-    }
-  }
-}
-const log = new Logger();
 
 
-function addWatchers(folder) {
-  return false;
-  log.debug('addwatcher to '+folder);
-  fs.readdir(folder, {withFileTypes: true}, function(err, files) {
-    if (err) {
-      log.warn('Error in addWatchers, '+err.message);
-    } else {
-      files.forEach(function(file){
-        if (file.isDirectory()) {
-          addWatchers(path.join(folder,file.name));
-        }
-      });
-    }
-  });
-  dirMap[folder] = fs.watch(folder,{persistent: false},function(event, name) {
-    //name may be folder
-    if (event == 'rename') {
-      setTimeout(function(){
-        let originalPath = path.join(folder, name);
-        fs.stat(originalPath, function(err, stat) {
-          let lossyPath = originalPath.replace(FILE_DIR,path.resolve('./lossy'));
-          log.debug('dealing with lossy for '+originalPath+' and '+lossyPath);
-          if (!err) {
-            makeLossyImage(originalPath, lossyPath, false);
-          } else {
-            fs.unlink(lossyPath, function(err) {
-              if (err) {
-                log.warn('Could not delete path='+lossyPath);
-              }
-            });
-          }
-        });
-      },500);
-    }
-  });
-}
-addWatchers(FILE_DIR);
+
 
 class PasswordStore {
   constructor() {
@@ -167,13 +326,20 @@ class PasswordStore {
   
   //starts with /inf, for example
   hasAccess(path, pass) {
-    const parts = path.split('/');
-    try {
-      const result = this.map[parts[2]];
-      return !result || pass == result;
-    } catch (e) {
-      return false;
+    let parts = path.substring(1).split('/');
+    parts.shift(); //get rid of inf
+    let pathPortion = '';
+    for (let i = 0; i < parts.length; i++) {
+      pathPortion += '/'+parts[i];
+      if (pathPortion.startsWith('/')) {
+        pathPortion = pathPortion.substring(1);
+      }
+      let correctPass = passStore.map[pathPortion];
+      if (correctPass) {
+        return pass == correctPass;
+      }
     }
+    return true;
   }
 }
 const passStore = new PasswordStore();
@@ -212,9 +378,9 @@ function checkExpire(req,res,next) {
 function checkPassword(req,res,next) {
   try {
     const pathParts = req.path.substring(1).split('/');
-    let pathPortion;
+    let pathPortion = '';
     for (let i = 0; i < pathParts.length; i++) {
-      pathPortion = '/'+pathParts[i];
+      pathPortion += '/'+pathParts[i];
       if (pathPortion.startsWith('/')) {
         pathPortion = pathPortion.substring(1);
       }
@@ -409,7 +575,7 @@ function doZip(req,res,next) {
     if (reqPath == "/inf") {
       res.status(400).send("<h1>Cannot download root</h1>");
     }
-    const source = `./file-dir${reqPath}`;
+    const source = `${FILE_DIR}${reqPath}`;
     const destination = `./temp${reqPath}.zip`;
     
     
@@ -418,7 +584,7 @@ function doZip(req,res,next) {
         if (err) {
           //probably time to create
           //TODO get rid of the space, I messed up somewhere else.
-          const archiver = new YazlArchiver(`./file-dir/ `, destination);
+          const archiver = new YazlArchiver(FILE_DIR, destination);
           //package everything
           packageRecursively(source, archiver).then(function() {
             archiver.finalizeArchive().then(function() {
@@ -454,10 +620,10 @@ function doZip(req,res,next) {
 function serveListing(req,res,next) {
   let reqPath = decodeURIComponent(req.path);
   reqPath = reqPath.endsWith('/') ? reqPath.substring(0,reqPath.length-1) : reqPath;
-  const objPath = './file-dir'+reqPath;
+  const objPath = FILE_DIR+reqPath;
 
   fs.stat(objPath,function(err,stats) {
-    if (!err && stats.isDirectory()) {
+    if (!err && (stats.isDirectory() || stats.isSymbolicLink())) {
       fs.readdir(objPath,{withFileTypes: true},function(err, files) {
         if (!err) {
           let backgroundColor = "#ffffff";
@@ -477,6 +643,11 @@ function serveListing(req,res,next) {
             let backUrl = req.baseUrl+reqPath.substr(0,reqPath.lastIndexOf('/'));
             if (req.query.pass) {
               backUrl+='?pass='+req.query.pass;
+              if (req.query.imagecompress) {
+                backUrl+='&imagecompress='+req.query.imagecompress;
+              }
+            } else if (req.query.imagecompress) {
+              backUrl+='?imagecompress='+req.query.imagecompress;
             }
             html+=`<a href="${backUrl}"><i class="fa fa-backward" style="color: black; margin-right:15px;border: 5px solid black;border-radius: 10px;padding: 2px 5px 2px 0px;"></i></a>Files and Folders</h1></br>`;
             html+= `<div class="dlcenter"><a style="color: black" href="${req.originalUrl+ (Object.keys(req.query)==0 ? '?zip=1' : '&zip=1')}"><div class="dl">`
@@ -490,7 +661,7 @@ function serveListing(req,res,next) {
           let others = [];
           files.forEach(function(file){
             if (passStore.hasAccess(reqPath+'/'+file.name, req.query.pass)) {
-              if (file.isDirectory()) {
+              if (file.isDirectory() || file.isSymbolicLink()) {
                 directories.push(file);
               } else {
                 const period = file.name.lastIndexOf('.');
@@ -503,6 +674,12 @@ function serveListing(req,res,next) {
                   case 'jpg':
                   case 'png':
                   case 'gif':
+                  case 'jpeg':
+                  case 'dng':
+                  case 'avif':
+                  case 'jxl':
+                  case 'webp':
+                  case 'heic':
                     pictures.push(file);
                     break;
                   case 'mp3':
@@ -531,7 +708,7 @@ function serveListing(req,res,next) {
             const fileWithQuery = `${encodeURIComponent(file.name)+(req.query.pass ? '?pass='+req.query.pass : '')}`;
             const pathUrl = `/files${reqPath}/${fileWithQuery}`;
             const lossyUrl = `/lossy${reqPath}/${fileWithQuery}`;
-            if (file.isDirectory()) {
+            if (file.isDirectory() || file.isSymbolicLink()) {
               html+=`<span class="main"><a href="${pathUrl}"><i class="fa fa-folder fa-6" style="color:black; font-size: 17em"></i></a><span class="text">${file.name}</span></span>`;
             }
           });
@@ -541,15 +718,8 @@ function serveListing(req,res,next) {
             const pathUrl = `/files${reqPath}/${fileWithQuery}`;
             const lossyUrl = `/lossy${reqPath}/${fileWithQuery}`;
             const period = file.name.lastIndexOf('.');
-            let ext = file.name.substr(period+1).toLowerCase();
-            switch (ext) {
-            case 'jpg':
-            case 'png':
-            case 'gif':
-              const thumbnailPath = `/thumbnails${reqPath}/${fileWithQuery}`;
-              html+= `<span class="main"><a href="${lossyUrl}"><img src="${thumbnailPath}" id=${file.name} onerror="this.src='/assets/warning.png'" alt="${file.name}" width="256"></a><span class="text">${file.name}</span></span>`;
-              break;
-            }
+            const thumbnailPath = `/thumbnails${reqPath}/${fileWithQuery}`;
+            html+= `<span class="main"><a href="${lossyUrl}"><img src="${thumbnailPath}" id=${file.name} onerror="this.src='/assets/warning.png'" alt="${file.name}" width="256"></a><span class="text">${file.name}</span></span>`;
           });
                         
           others.forEach(function(file) {
@@ -616,7 +786,7 @@ function serveListing(req,res,next) {
   });
 }
 
-const serveStatic = express.static('./file-dir');
+const serveStatic = express.static(FILE_DIR);
 
 const platform = os.platform();
 const arch = os.arch();
@@ -637,7 +807,7 @@ function makeThumbnail(req,res,next) {
   reqPath = reqPath.endsWith('/') ? reqPath.substring(0,reqPath.length-1) : reqPath;
   const originalPath = path.join(FILE_DIR,'.'+reqPath);
   const lastSlash = reqPath.lastIndexOf('/');
-  const directory = path.join('./thumbnails','.'+reqPath.substr(0,lastSlash));
+  const directory = path.join(THUMBNAIL_DIR,'.'+reqPath.substr(0,lastSlash));
   const file = reqPath.substr(lastSlash+1);
   const fileNoExtension = file.substr(0, file.lastIndexOf('.'));
 
@@ -704,7 +874,7 @@ function makeLossyImage(originalPath, lossyPath, returnImage, imageType) {
     let func = returnImage ? fs.readFile : fs.stat;
     func(lossyPath,function(err,data) {
       if (err) {
-        log.debug(`Cache miss: lossy, ${lossyPath}`);
+        log.debug('Lossy create '+ lossyPath);
         //cant find, generate.
         fs.readFile(originalPath,function(err,data){
           if (err) {
@@ -714,21 +884,21 @@ function makeLossyImage(originalPath, lossyPath, returnImage, imageType) {
             const lastSlash = lossyPath.lastIndexOf('/');
             const directory = lossyPath.substr(0,lastSlash);
             mkdirp(directory).then(() => {
-            sharp(data)
-              [imageType.method](imageType.options.lossy)
-              .toBuffer((err, out, info)=> {
-                if (err) {
-                  log.warn(`makeLossyImaage sharp failed on ${originalPath}, ${err.message}`);
-                  return reject(err);
-                } else {
-                  resolve(returnImage ? out: undefined);
-                  fs.writeFile(lossyPath, out, {mode: FILE_CREATION_MODE}, function(err){
-                    if (err) {
-                      log.warn(`makeLossyImage failed writing result ${lossyPath}, ${err.message}`);
-                    }
-                  });
-                }
-              });
+              sharp(data)
+                [imageType.method](imageType.options.lossy)
+                .toBuffer((err, out, info)=> {
+                  if (err) {
+                    log.warn(`makeLossyImaage sharp failed on ${originalPath}, ${err.message}`);
+                    return reject(err);
+                  } else {
+                    resolve(returnImage ? out: undefined);
+                    fs.writeFile(lossyPath, out, {mode: FILE_CREATION_MODE}, function(err){
+                      if (err) {
+                        log.warn(`makeLossyImage failed writing result ${lossyPath}, ${err.message}`);
+                      }
+                    });
+                  }
+                });
             }).catch((err)=>{
               log.warn(`makeLossyImage failed mkdir for ${lossyPath}, ${err.message}`);
               return reject(err);
@@ -736,7 +906,7 @@ function makeLossyImage(originalPath, lossyPath, returnImage, imageType) {
           }
         });
       } else {
-        log.debug(`Cache hit: lossy, ${lossyPath}`);
+//        log.debug('Lossy reuse, '+lossyPath);
         resolve(returnImage ? data : undefined);
       }
     });
@@ -754,14 +924,13 @@ function imageCompress(req, res, next) {
     const lastDotIndex = req.path.lastIndexOf('.');
     if (lastDotIndex != -1) {
       const ext = req.path.substr(lastDotIndex+1).toLowerCase();
-      if (ext == 'jpg' || ext == 'jpeg' || ext == 'png') {// || ext == 'gif') {
-
-        const lossyPath = path.resolve('./lossy','.'+reqPath);
+      if (EXTENSIONS_TO_COMPRESS.indexOf(ext) != -1) {
+        const lossyPath = path.resolve(LOSSY_DIR,'.'+reqPath);
 
         let imageType = IMAGE_COMPRESSION_TYPES[req.query.imagecompress];
         if (!imageType) { imageType = IMAGE_COMPRESSION_TYPES[DEFAULT_IMAGE_COMPRESSION_TYPE] }
 
-        const lossyConvertedPath = path.resolve('./lossy',`.${reqPath.substring(0, lastDotIndex)}.${imageType.extension}`);
+        const lossyConvertedPath = path.resolve(LOSSY_DIR,`.${reqPath.substring(0, lastDotIndex)}.${imageType.extension}`);
 
         makeLossyImage(originalPath, lossyConvertedPath, true, imageType).then(function(image) {
           res.status(200).set('Content-Type', 'image/'+imageType.mime).send(image);
@@ -790,7 +959,6 @@ function closeOnSignals(listener, signals) {
 }
 
 app.enable('trust proxy');
-app.use('/favicon.ico', [express.static('./favicon.png')]),
 app.use('/favicon.png', [express.static('./favicon.png')]),
 app.use('/stats', [logReqs, getStats]);
 app.use('/thumbnails', [forbidden, checkPassword, makeThumbnail]);
