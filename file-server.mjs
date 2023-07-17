@@ -38,6 +38,18 @@ const COMPRESSION_MIN_SIZE = '64kb';
 const COMPRESSION_ZLIB_LEVEL = 6;//see https://blogs.akamai.com/2016/02/understanding-brotlis-potential.html
 const COMPRESSION_BROTLI_LEVEL = 5;
 
+const NANOGALLERY_CONFIG = {
+  thumbnailHeight: 256,
+  thumbnailWidth: 'auto',
+  viewerHideToolsDelay: 360000, //doesnt seem possible to just disable this. -1 just disables toolbar
+  viewerTools: {
+    topLeft: 'playPauseButton, label, downloadButton, shareButton',
+    topRight: 'zoomButton, rotateLeft, rotateRight, closeButton'
+  },
+  thumbnailHoverEffect2: 'toolsAppear|scale120',
+  thumbnailToolbarImage: { topLeft: 'download', topRight: 'select' }
+}
+
 sharp.cache(false); 
 
 const IMAGE_COMPRESSION_TYPES = {
@@ -302,7 +314,11 @@ const HTML_STYLE = '.main {text-align: center; vertical-align: middle; position:
   +' .dl {text-align: center;border: 3px solid black;border-radius: 16px;display: block;}'
   +' .dlcenter {margin-left: auto; margin-right:auto; width: 30%}';
 
-const START_LISTING_HTML='<!DOCTYPE html><html><head><style>'+HTML_STYLE+'</style><link rel="stylesheet" href="/assets/fa/css/font-awesome.min.css"></head><link rel="icon" type="image/png" href="/favicon.png"><body ';
+const START_LISTING_HTML='<!DOCTYPE html><html><head><meta name="viewport" content="user-scalable=no, width=device-width, initial-scale=1, maximum-scale=1">'
+  +'<script src="https://scalie.org/files/inf/default/lib/jquery.min.jsm.js" type="text/javascript"></script>'
+  +'<link  href="https://scalie.org/files/inf/default/lib/nanogallery2.min.css" rel="stylesheet" type="text/css">'
+  +'<script type="text/javascript" src="https://scalie.org/files/inf/default/lib/jquery.nanogallery2.core.min.js"></script>'
+  +'<style>'+HTML_STYLE+'</style><link rel="stylesheet" href="/assets/fa/css/font-awesome.min.css"></head><link rel="icon" type="image/png" href="/favicon.png"><body ';
 const END_LISTING_HTML='</div></body></html>';
 
 
@@ -652,7 +668,7 @@ function serveListing(req,res,next) {
             html+=`<a href="${backUrl}"><i class="fa fa-backward" style="color: black; margin-right:15px;border: 5px solid black;border-radius: 10px;padding: 2px 5px 2px 0px;"></i></a>Files and Folders</h1></br>`;
             html+= `<div class="dlcenter"><a style="color: black" href="${req.originalUrl+ (Object.keys(req.query)==0 ? '?zip=1' : '&zip=1')}"><div class="dl">`
               +'<i class="fa fa-floppy-o" style="padding: 5px; font-size: 2em">  Download as Zip</i>'
-              +'</div></a></div><div>';
+              +`</div></a></div>`;
           }
           let directories = [];
           let videos = [];
@@ -712,14 +728,17 @@ function serveListing(req,res,next) {
               html+=`<span class="main"><a href="${pathUrl}"><i class="fa fa-folder fa-6" style="color:black; font-size: 17em"></i></a><span class="text">${file.name}</span></span>`;
             }
           });
-                        
+
+          html+=`<div id="nanogallery2"
+                  data-nanogallery2 = '${JSON.stringify(NANOGALLERY_CONFIG)}'>`;
+
           pictures.forEach(function(file) {
             const fileWithQuery = `${encodeURIComponent(file.name)+(req.query.pass ? '?pass='+req.query.pass : '')}`;
             const pathUrl = `/files${reqPath}/${fileWithQuery}`;
             const lossyUrl = `/lossy${reqPath}/${fileWithQuery}`;
             const period = file.name.lastIndexOf('.');
             const thumbnailPath = `/thumbnails${reqPath}/${fileWithQuery}`;
-            html+= `<span class="main"><a href="${lossyUrl}"><img src="${thumbnailPath}" id=${file.name} onerror="this.src='/assets/warning.png'" alt="${file.name}" width="256"></a><span class="text">${file.name}</span></span>`;
+            html+=`<a href="${pathUrl}" data-ngThumb="${thumbnailPath}">${file.name}</a>`;
           });
                         
           others.forEach(function(file) {
@@ -728,7 +747,7 @@ function serveListing(req,res,next) {
             const lossyUrl = `/lossy${reqPath}/${fileWithQuery}`;
             const period = file.name.lastIndexOf('.');
             let ext = file.name.substr(period+1).toLowerCase();
-            html+=`<span class="main"><a href="${pathUrl}"><i class="fa fa-file fa-6" style="color:black; font-size: 17em"></i></a><span class="text">${file.name}</span></span>`;
+            html+=`<a href="${pathUrl}">${file.name}</a>`;
           });
 
           sounds.forEach(function(file) {
@@ -736,22 +755,7 @@ function serveListing(req,res,next) {
             const pathUrl = `/files${reqPath}/${fileWithQuery}`;
             const lossyUrl = `/lossy${reqPath}/${fileWithQuery}`;
             const period = file.name.lastIndexOf('.');
-            let ext = file.name.substr(period+1).toLowerCase();
-            switch (ext) {
-            case 'mp3':
-              html+=`<span class="main"><audio controls width="256"><source src="${pathUrl}" type="audio/mpeg"></audio><div><a href="${pathUrl}">${file.name}</a></div></span>`;
-              break;
-            case 'opus':
-              ext="ogg; codecs=opus";
-            case 'wav':
-            case 'ogg':
-            case 'flac':
-              html+=`<span class="main"><audio controls width="256"><source src="${pathUrl}" type="audio/${ext}"></audio><div><a href="${pathUrl}">${file.name}</a></div></span>`;
-              break;
-            case 'm4a':
-              html+=`<span class="main"><audio controls width="256"><source src="${pathUrl}" type="audio/mp4"></audio><div><a href="${pathUrl}">${file.name}</a></div></span>`;
-              break;
-            }    
+            html+=`<a href="${pathUrl}">${file.name}</a>`;
           });
 
           videos.forEach(function(file) {
@@ -759,18 +763,7 @@ function serveListing(req,res,next) {
             const pathUrl = `/files${reqPath}/${fileWithQuery}`;
             const lossyUrl = `/lossy${reqPath}/${fileWithQuery}`;
             const period = file.name.lastIndexOf('.');
-            let ext = file.name.substr(period+1).toLowerCase();
-            switch (ext) {
-            case 'mkv':
-              html+=`<span class="main"><video controls height="480" preload="none"><source src="${pathUrl}"></video><div><a href="${pathUrl}">${file.name}</a></div></span>`;
-              break;
-            case 'm4v':
-              ext="mp4";
-            case 'mp4':
-            case 'webm':
-              html+=`<span class="main"><video controls height="480" preload="none"><source src="${pathUrl}" type="video/${ext}"></video><div><a href="${pathUrl}">${file.name}</a></div></span>`;
-              break;
-            }
+            html+=`<a href="${pathUrl}">${file.name}</a>`;
           });
 
           res.status(200).send(html+END_LISTING_HTML);
